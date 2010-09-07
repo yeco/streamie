@@ -1,7 +1,10 @@
 require.def("stream/status",
-  ["stream/twitterRestAPI", "stream/helpers", "stream/location", "text!../templates/status.ejs.html"],
-  function(rest, helpers, location, replyFormTemplateText) {
+  ["stream/twitterRestAPI", "stream/helpers", "stream/location", "stream/settings", "stream/keyValueStore", "text!../templates/status.ejs.html", "/ext/jquery.autocomplete.js"],
+  function(rest, helpers, location, settings, keyValue, replyFormTemplateText) {
     var replyFormTemplate = _.template(replyFormTemplateText);
+    
+    settings.registerNamespace("status", "Status");
+    settings.registerKey("status", "autocompleteScreenNames", "As-you-type autocomplete for screen names",  true);
     
     // get (or make) a form the reply to a tweet
     function getReplyForm(li) { // tweet li
@@ -12,7 +15,8 @@ require.def("stream/status",
           helpers: helpers
         }));
         form = li.find("form.status");
-        form.find("[name=status]").focus();
+        var textarea = form.find("[name=status]");
+        textarea.focus();
         form.bind("status:send", function () {
           form.hide();
           li.removeClass("form");
@@ -35,10 +39,26 @@ require.def("stream/status",
     
     return {
       
+      // implement autocomplete for screen_names
+      autocomplete: {
+        func: function autocomplete (stream) {
+          $(document).bind("status:focus", function (e, textarea) {
+            if(settings.get("status", "autocompleteScreenNames")) {
+              if(!textarea.data("autocomplete:names")) {
+                textarea.data("autocomplete:names", true);
+                textarea.autocomplete(keyValue.Store("screen_names").keys(), {
+                  multiple: true,
+                  multipleSeparator: " "
+                });
+              }
+            }
+          })
+        }
+      },
+      
       // observe events on status forms
       observe: {
-        name: "oberserve",
-        func: function (stream) {
+        func: function oberserve (stream) {
           
           // submit event
           $(document).delegate("form.status", "submit", function (e) {
@@ -55,10 +75,14 @@ require.def("stream/status",
             return false;
           });
           
+          var last;
           function updateCharCount (e) {
-            var val = e.target.value;
-            var target = $(e.target).closest("form").find(".characters");
-            target.text( e.target.value.length );
+            var length = e.target.value.length;
+            
+            if(length != last) {
+              $(e.target).closest("form").find(".characters").text( length );
+              last = length;
+            }
           }
           
           $(document).delegate("form.status [name=status]", "keyup change paste", updateCharCount)
@@ -66,7 +90,9 @@ require.def("stream/status",
           // update count every N millis to catch any changes, though paste, auto complete, etc.
           $(document).delegate("form.status [name=status]", "focus", function (e) {
             updateCharCount(e)
-            $(e.target).data("charUpdateInterval", setInterval(function () { updateCharCount(e) }, 100));
+            var textarea = $(e.target);
+            textarea.data("charUpdateInterval", setInterval(function () { updateCharCount(e) }, 200));
+            textarea.trigger("status:focus", [textarea]);
           })
           $(document).delegate("form.status [name=status]", "blur", function (e) {
             var interval = $(e.target).data("charUpdateInterval");
@@ -79,8 +105,7 @@ require.def("stream/status",
       
       // handle event for the reply form inside tweets
       replyForm: {
-        name: "replyForm",
-        func: function (stream) {
+        func: function replyForm (stream) {
           $(document).delegate("#stream .actions .reply", "click", function (e) {
             var li = $(this).parents("li");
             var form = getReplyForm(li);
@@ -92,8 +117,7 @@ require.def("stream/status",
       
       // The old style retweet, with the ability to comment on the original text
       quote: {
-        name: "quote",
-        func: function (stream) {
+        func: function quote (stream) {
           $(document).delegate("#stream .quote", "click", function (e) {
             var li = $(this).parents("li");
             var tweet = li.data("tweet");
@@ -111,8 +135,7 @@ require.def("stream/status",
       
       // Click on retweet button
       retweet: {
-        name: "retweet",
-        func: function (stream) {
+        func: function retweet (stream) {
           $(document).delegate("#stream .actions .retweet", "click", function (e) {
             if(confirm("Do you really want to retweet?")) {
               var button = $(this);
@@ -134,8 +157,7 @@ require.def("stream/status",
       
       // adds geo coordinates to statusses
       location: {
-        name: "location",
-        func: function () {
+        func: function locationPlugin () {
           $(document).delegate("textarea[name=status]", "focus", function () {
             var form = $(this).closest("form");
             
@@ -150,8 +172,7 @@ require.def("stream/status",
       
       // Click on favorite button
       favorite: {
-        name: "favorite",
-        func: function (stream) {
+        func: function favorite (stream) {
           $(document).delegate("#stream .actions .favorite", "click", function (e) {
             var li = $(this).parents("li");
             var tweet = li.data("tweet");
@@ -178,10 +199,10 @@ require.def("stream/status",
       
       // show all Tweets from one conversation
       conversation: {
-        name: "conversation",
-        func: function (stream) {
+        func: function conversation (stream) {
           
           $(document).delegate("#stream .conversation", "click", function (e) {
+            e.preventDefault();
             var li = $(this).parents("li");
             var tweet = li.data("tweet");
             var con = tweet.conversation;
@@ -204,14 +225,19 @@ require.def("stream/status",
                 $("head").append(style);
             }
             
+            $("li."+className).each(function () {
+              var li = $(this);
+              var tweet = li.data("tweet");
+              tweet.fetchNotInStream()
+            })
+            
           })
         }
       },
       
       // Double click on tweet text turns text into JSON; Hackability FTW!
       showJSON: {
-        name: "showJSON",
-        func: function (stream) {
+        func: function showJSON (stream) {
           $(document).delegate("#stream p.text", "dblclick", function (e) {
             var p = $(this);
             var li = p.closest("li");

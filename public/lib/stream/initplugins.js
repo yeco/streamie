@@ -3,15 +3,21 @@
  */
 
 require.def("stream/initplugins",
-  ["stream/tweet", "stream/twitterRestAPI", "stream/helpers", "text!../templates/tweet.ejs.html"],
-  function(tweetModule, rest, helpers, templateText) {
+  ["stream/tweet", "stream/settings", "stream/twitterRestAPI", "stream/helpers", "text!../templates/tweet.ejs.html"],
+  function(tweetModule, settings, rest, helpers, templateText) {
+    
+    settings.registerNamespace("general", "General");
+    settings.registerKey("general", "showTwitterBackground", "Show my background from Twitter",  false);
+    
+    settings.registerNamespace("notifications", "Notifications");
+    settings.registerKey("notifications", "favicon", "Highlight Favicon (Website icon)",  true);
+    settings.registerKey("notifications", "throttle", "Throttle (Only notify once per minute)", false);
     
     return {
       
       // when location.hash changes we set the hash to be the class of our HTML body
       hashState: {
-        name: "hashState",
-        func: function (stream) {
+        func: function hashState (stream) {
           function change() {
             var val = location.hash.replace(/^\#/, "");
             $("body").attr("class", val);
@@ -23,10 +29,26 @@ require.def("stream/initplugins",
         }
       },
       
+      // change the background to the twitter background
+      background: {
+        func: function background (stream) {
+          settings.subscribe("general", "showTwitterBackground", function (bool) {
+            if(bool) {
+              stream.userInfo(function (user) {
+                if(user.profile_background_image_url) {
+                  $("body").css("backgroundImage", "url("+user.profile_background_image_url+")")
+                }
+              })
+            } else {
+               $("body").css("backgroundImage", null)
+            }
+          });
+        }
+      },
+      
       // make the clicked nav item "active"
       navigation: {
-        name: "navigation",
-        func: function (stream) {
+        func: function navigation (stream) {
           var mainstatus = $("#mainstatus");
           
           // close mainstatus when user hits escape
@@ -49,11 +71,11 @@ require.def("stream/initplugins",
                 mainstatus.addClass("show");
                 mainstatus.find("[name=status]").focus();
               }
-              return;
             }
-            
-            a.closest("#mainnav").find("li").removeClass("active");
-            li.addClass("active")
+            if(li.hasClass("activatable")) { // special case for new tweet
+              a.closest("#mainnav").find("li").removeClass("active");
+              li.addClass("active")
+            }
           });
           
           mainstatus.bind("status:send", function () {
@@ -68,39 +90,65 @@ require.def("stream/initplugins",
       
       // signals new tweets
       signalNewTweets: {
-        name: "signalNewTweets",
-        func: function () {
+        func: function signalNewTweets () {
           var win = $(window);
           var dirty = win.scrollTop() > 0;
           var newCount = 0;
-          function redraw() { // this should do away
+          
+          function redraw() {
             var signal = newCount > 0 ? "("+newCount+") " : "";
-            document.title = document.title.replace(/^(?:\(\d+\) )*/, signal); 
+            document.title = document.title.replace(/^(?:\(\d+\) )*/, signal);
           }
+          
           win.bind("scroll", function () {
             dirty = win.scrollTop() > 0;
             if(!dirty) { // we scrolled to the top. Back to 0 unread
               newCount = 0;
               setTimeout(function () { // not do this winthin the scroll event. Makes Chrome much happier performance wise.
-                redraw();
-                $(document).trigger("tweet:unread", [newCount])
+                $(document).trigger("notify:tweet:unread", [newCount])
               }, 0);
             }
+          });
+          $(document).bind("notify:tweet:unread", function () {
+            redraw();
           });
           $(document).bind("tweet:new", function () {
             newCount++;
             if(dirty) {
-              redraw()
               $(document).trigger("tweet:unread", [newCount])
             }
           })
+        }
+      },      
+      
+      // tranform "tweet:unread" events into "notify:tweet:unread" events
+      // depending on setting, only fire the latter once a minute
+      throttableNotifactions: {
+        func: function throttableNotifactions () {
+          var notifyCount = null;
+          setInterval(function () {
+            // if throttled, only redraw every N seconds;
+            if(settings.get("notifications", "throttle")) {
+              if(notifyCount != null) {
+                $(document).trigger("notify:tweet:unread", [notifyCount]);
+                notifyCount = null;
+              }
+            }
+          }, 60 * 1000) // turn this into a setting
+          $(document).bind("tweet:unread", function (e, count) {
+            // disable via setting
+            if(settings.get("notifications", "throttle")) {
+              notifyCount = count;
+            } else {
+              $(document).trigger("notify:tweet:unread", [count])
+            }
+          });
         }
       },
       
       // listen to keyboard events and translate them to semantic custom events
       keyboardShortCuts: {
-        name: "keyboardShortCuts",
-        func: function () {
+        func: function keyboardShortCuts () {
           
           function trigger(e, name) {
             $(e.target).trigger("key:"+name);
@@ -115,16 +163,14 @@ require.def("stream/initplugins",
       },
       
       personalizeForCurrentUser: {
-        name: "personalizeForCurrentUser",
-        func: function (stream) {
+        func: function personalizeForCurrentUser (stream) {
           $("#currentuser-screen_name").text("@"+stream.user.screen_name)
         }
       },
       
       // sends an event after user
       notifyAfterPause: {
-        name: "notifyAfterPause",
-        func: function () {
+        func: function notifyAfterPause () {
           
           function now() {
             return (new Date).getTime();
@@ -144,19 +190,23 @@ require.def("stream/initplugins",
       
       // display state in the favicon
       favicon: {
-        name: "favicon",
+        
+        canvases: {}, // cache for canvas objects
         colorCanvas: function (color) {
           // remove the current favicon. Just changung the href doesnt work.
           var favicon = $("link[rel~=icon]")
           favicon.remove()
-          
-          // make a quick canvas.
-          var canvas = document.createElement("canvas");
-          canvas.width = 16;
-          canvas.height = 16;
-          var ctx = canvas.getContext("2d");
-          ctx.fillStyle = color;  
-          ctx.fillRect(0, 0, 16, 16);
+          var canvas = this.canvases[color];
+          if(!canvas) {
+            // make a quick canvas.
+            canvas = document.createElement("canvas");
+            canvas.width = 16;
+            canvas.height = 16;
+            var ctx = canvas.getContext("2d");
+            ctx.fillStyle = color;  
+            ctx.fillRect(0, 0, 16, 16);
+            this.canvases[color] = canvas
+          }
           
           // convert canvas to DataURL
           var url = canvas.toDataURL();
@@ -165,9 +215,8 @@ require.def("stream/initplugins",
           $("head").append($('<link rel="shortcut icon" type="image/x-icon" href="'+url+'" />'));
         },
         
-        func: function (stream, plugin) {
-          
-          $(document).bind("tweet:unread", function (e, count) {
+        func: function favicon (stream, plugin) {
+          $(document).bind("notify:tweet:unread", function (e, count) {
             var color = "#000000";
             if(count > 0) {
               color = "#278BF5";
@@ -180,8 +229,7 @@ require.def("stream/initplugins",
       // Use the REST API to load the users's friends timeline, mentions and friends's retweets into the stream
       // this also happens when we detect that the user was offline for a while
       prefillTimeline: {
-        name: "prefillTimeline",
-        func: function (stream) { 
+        func: function prefillTimeline (stream) { 
           
           function prefill () {
             var all = [];
@@ -210,10 +258,30 @@ require.def("stream/initplugins",
               }
             }
 
+            
+            var since = stream.newestTweet();
+            function handleSince(tweets) {
+              if(tweets) {
+                var oldest = tweets[tweets.length-1];
+                if(oldest) {
+                  if(parseInt(oldest.id, 10) > since) {
+                    oldest._missingTweets = true; // mark the oldest tweet if it is newer than the one we knew before
+                  }
+                }
+                if(oldest) {
+                  // fetch other types of statuses since the last regular status
+                  rest.get("/1/statuses/retweeted_to_me.json?since_id="+oldest.id, handle);
+                  rest.get("/1/statuses/mentions.json?since_id="+oldest.id, handle);
+                } else {
+                  rest.get("/1/statuses/retweeted_to_me.json?count=20", handle);
+                  rest.get("/1/statuses/mentions.json?count=50", handle);
+                }
+              }
+              handle.apply(this, arguments);
+            }
+            
             // Make API calls
-            rest.get("/1/statuses/retweeted_to_me.json?count=20", handle);
-            rest.get("/1/statuses/friends_timeline.json?count=20", handle);
-            rest.get("/1/statuses/mentions.json?count=20", handle);
+            rest.get("/1/statuses/friends_timeline.json?count=100", handleSince);
             rest.get("/1/favorites.json", handle);
           }
           
@@ -224,8 +292,6 @@ require.def("stream/initplugins",
           prefill(); // do once at start
         }
       }
-      
     }
-      
   }
 );

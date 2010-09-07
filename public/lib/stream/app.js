@@ -12,8 +12,8 @@ if(typeof console == "undefined") {
   }
 }
 require.def("stream/app",
-  ["stream/tweetstream", "stream/tweet", "stream/streamplugins", "stream/initplugins", "stream/client", "stream/status", "/ext/underscore.js", "/ext/modernizr-1.5.js", "http://ajax.googleapis.com/ajax/libs/jquery/1.4.2/jquery.min.js"],
-  function(tweetstream, tweetModule, streamPlugin, initPlugin, client, status) {
+  ["stream/tweetstream", "stream/tweet", "stream/settings", "stream/streamplugins", "stream/initplugins", "stream/linkplugins", "stream/settingsDialog", "stream/client", "stream/status", "/ext/underscore.js", "/ext/modernizr-1.5.js", "http://ajax.googleapis.com/ajax/libs/jquery/1.4.2/jquery.min.js"],
+  function(tweetstream, tweetModule, settings, streamPlugin, initPlugin, linkPlugin, settingsDialog, client, status) {
     
     // Stream plugins are called in the order defined here for each incoming tweet.
     // Important: Stream plugins have to call this() to continue the execution!
@@ -29,10 +29,11 @@ require.def("stream/app",
       streamPlugin.template,
       streamPlugin.htmlEncode,
       streamPlugin.formatTweetText,
-      streamPlugin.renderTemplate, 
+      streamPlugin.executeLinkPlugins,
+      streamPlugin.renderTemplate,
+      streamPlugin.age,
       streamPlugin.prepend,
       streamPlugin.keepScrollState,
-      streamPlugin.age,
       streamPlugin.newTweetEvent
     ];
     
@@ -47,6 +48,8 @@ require.def("stream/app",
       initPlugin.notifyAfterPause,
       initPlugin.keyboardShortCuts,
       initPlugin.favicon,
+      initPlugin.throttableNotifactions,
+      initPlugin.background,
       status.observe,
       status.replyForm,
       status.location,
@@ -54,11 +57,19 @@ require.def("stream/app",
       status.retweet,
       status.favorite,
       status.conversation,
-      status.showJSON
+      status.autocomplete,
+      status.showJSON,
+      settingsDialog.init
     ];
     
-    var stream = new tweetstream.Stream();
-    window.stream = stream; // make this globally accessible so we can see what is in it.
+    // linkPlugins are executed for each link in a tweet
+    // they perform actions such as previewing images or expading short URLs
+    var linkPlugins = [
+      linkPlugin.imagePreview
+    ];
+    
+    var stream = new tweetstream.Stream(settings);
+    window.streamie = stream; // make this globally accessible so we can see what is in it.
     
     var initial = true;
     
@@ -66,6 +77,7 @@ require.def("stream/app",
       start: function () {
         $(function () {
           stream.addPlugins(streamPlugins);
+          stream.addLinkPlugins(linkPlugins);
           
           location.hash = ""; // start fresh, we dont maintain any important state
           
@@ -73,17 +85,14 @@ require.def("stream/app",
           var connect = function(data) {
             data = JSON.parse(data); // data must always be JSON
             if(data.error) {
-              //console.log("Error: "+data.error)
-              if(data.error == "no_auth") {
-                if(confirm("Streamie.org is a Twitter client. We'll send you to Twitter to ask for access to your account now. OK?")) {
-                  location.href = "/access" // redirect to do oauth
-                } else {
-                  // No where else to go. Patches welcome;
-                  location.href = "http://www.nonblocking.io/2010/08/future-is-here-i-just-forked-running.html";
-                }
-              }
+              console.log(data.error);
             }
             else if(data.action == "auth_ok") {
+              $("#about").hide();
+              $("#header").show();
+              $(document).bind("tweet:first", function () {
+                $("#content .logo").hide();
+              });
               // we are now connected and authorization was fine
               stream.user = data.info; // store the info of the logged user
               if(initial) {
@@ -91,7 +100,8 @@ require.def("stream/app",
                 // run initPlugins
                 initPlugins.forEach(function (plugin) {
                   plugin.func.call(function () {}, stream, plugin);
-                })
+                });
+                $(document).trigger("streamie:init:complete");
               }
             }
             else if(data.tweet) {
